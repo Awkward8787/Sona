@@ -93,7 +93,11 @@ export class ProjectOps {
 
   static audible(project: Project, track: Track): boolean {
     if (track.mute) return false;
-    if (ProjectOps.anySolo(project) && !track.solo) return false;
+    const bus = (project.buses ?? []).find((item) => item.id === track.busId);
+    if (bus?.mute) return false;
+    if (ProjectOps.anySolo(project)) return track.solo;
+    const groups = (project.buses ?? []).filter((item) => item.kind === "group");
+    if (groups.some((item) => item.solo)) return Boolean(bus?.solo);
     return true;
   }
 

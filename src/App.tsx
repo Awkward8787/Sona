@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { ActionEngine } from "./action/ActionEngine";
-import { AudioEngine } from "./audio/AudioEngine";
+import { AudioEngine, type MixLevels } from "./audio/AudioEngine";
 import { WavEncoder } from "./audio/WavEncoder";
-import { command } from "./daw/DawCommand";
+import { command, type DawCommand } from "./daw/DawCommand";
 import { EngineerReplies } from "./engine/EngineerReplies";
 import { ExportEngine } from "./export/ExportEngine";
 import { Format } from "./model/Format";
 import { Ids } from "./model/Ids";
-import type { ChatMessage, MarkerName, MasterPreset, Project, StoredBuffer, StudioMode, Track } from "./model/types";
+import type { ChatMessage, MasterPreset, Project, StoredBuffer, StudioMode } from "./model/types";
 import { SonaMemory, SonaMemoryStore } from "./memory/SonaMemory";
 import { MicChain } from "./mic/MicChain";
 import { SonaPipeline, type PipelineState, type TurnResult } from "./pipeline/SonaPipeline";
@@ -15,13 +15,16 @@ import { wordsFromSpan } from "./record/WordTiming";
 import { Session } from "./session/Session";
 import { EngineerSpeech } from "./speech/EngineerSpeech";
 import { SpeechInput } from "./speech/SpeechInput";
+import { ProjectFile } from "./storage/ProjectFile";
 import { ProjectStore, type SessionSummary } from "./storage/ProjectStore";
 import { ArtistStage } from "./ui/ArtistStage";
 import { CommandLog } from "./ui/CommandLog";
+import { DeskTools } from "./ui/DeskTools";
 import { EngineerPanel } from "./ui/EngineerPanel";
 import { MasterBar } from "./ui/MasterBar";
-import { PhaseTwoPanel } from "./ui/PhaseTwoPanel";
+import { Mixer } from "./ui/Mixer";
 import { SessionsMenu } from "./ui/SessionsMenu";
+import { StudioModes } from "./ui/StudioModes";
 import { Timeline } from "./ui/Timeline";
 import { TransportBar } from "./ui/TransportBar";
 import { WaveformMark } from "./ui/WaveformMark";
@@ -56,6 +59,9 @@ export function App() {
   const masterOrigin = useRef<Project | null>(null);
   const masterEditing = useRef(false);
   const fileRef = useRef<HTMLInputElement>(null);
+  const projectFileRef = useRef<HTMLInputElement>(null);
+  const loopLatch = useRef(false);
+  const punchLatch = useRef(false);
   const stageRef = useRef<HTMLDivElement>(null);
 
   const [pipe, setPipe] = useState<PipelineState | null>(null);
@@ -73,6 +79,7 @@ export function App() {
   const [livePeaks, setLivePeaks] = useState<Float32Array | null>(null);
   const [findSeconds, setFindSeconds] = useState<number | null>(null);
   const [ready, setReady] = useState(false);
+  const [levels, setLevels] = useState<MixLevels>({ master: 0, tracks: {}, buses: {} });
 
   mutedRef.current = voiceMuted;
 
@@ -111,12 +118,23 @@ export function App() {
     if (reply.trim()) speak(reply);
   }
 
-  function apply(nextProject: Project, track: string, action: string, amount: number | string | null, baseProject?: Project) {
+  function onDesk(item: DawCommand, origin?: Project) {
     const state = pipeRef.current;
     if (!state) return;
-    const session = baseProject ? { ...state.session, project: baseProject } : state.session;
-    const applied = ActionEngine.applyProject(session, state.profile, state.log, state.future, nextProject, command(track, action, amount));
-    remember({ ...state, session: applied.session, profile: applied.profile, log: applied.log, future: applied.future });
+    const session = origin ? { ...state.session, project: origin } : state.session;
+    const applied = ActionEngine.run(session, state.profile, state.log, state.future, [item], {
+      ranking: state.ranking,
+      sampleBufferId: state.sampleBufferId,
+      audition: state.audition,
+    });
+    remember({
+      ...state,
+      session: applied.session,
+      profile: applied.profile,
+      log: applied.log,
+      future: applied.future,
+      commandsWhileRecording: applied.commandsWhileRecording ?? state.commandsWhileRecording,
+    });
   }
 
   async function beginFind() {
@@ -438,34 +456,79 @@ export function App() {
     if (!pipe || pipe.session.transport === "stopped") return;
     const handle = window.setInterval(() => {
       const clock = engineRef.current?.clock();
-      if (clock != null) setPlayhead(clock);
-      setMeter(engineRef.current?.meter() ?? 0);
-      if (pipe.session.transport === "recording") setLivePeaks(engineRef.current?.livePeaks() ?? null);
+      const state = pipeRef.current;
+      if (clock == null || !state) return;
+      const transport = state.session.transport;
+      const loop = state.session.project.loop;
+      const punch = state.session.project.punch;
+      if (transport !== "recording") punchLatch.current = false;
+      if (transport !== "playing") loopLatch.current = false;
+      if (transport === "playing" && loop && clock >= loop.endSec - 0.03 && !loopLatch.current) {
+        loopLatch.current = true;
+        engineRef.current?.play(loop.startSec);
+        setPlayhead(loop.startSec);
+        window.setTimeout(() => {
+          loopLatch.current = false;
+        }, 120);
+        return;
+      }
+      if (transport === "recording" && punch && clock >= punch.endSec - 0.03 && !punchLatch.current) {
+        punchLatch.current = true;
+        api.current.submit("stop", "typed");
+        return;
+      }
+      setPlayhead(clock);
+      const nextLevels = engineRef.current?.levels();
+      if (nextLevels) {
+        setLevels(nextLevels);
+        setMeter(nextLevels.master);
+      }
+      if (transport === "recording") setLivePeaks(engineRef.current?.livePeaks() ?? null);
     }, 80);
     return () => window.clearInterval(handle);
   }, [pipe]);
 
   useEffect(() => {
-    if (pipe && pipe.session.transport === "stopped") setPlayhead(pipe.session.playheadSec);
+    if (pipe && pipe.session.transport === "stopped") {
+      setPlayhead(pipe.session.playheadSec);
+      setMeter(0);
+      setLevels({ master: 0, tracks: {}, buses: {} });
+    }
   }, [pipe]);
+
+  useEffect(() => {
+    function onKey(event: KeyboardEvent) {
+      const target = event.target as HTMLElement | null;
+      const typing = Boolean(target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable));
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "z") {
+        event.preventDefault();
+        api.current.submit(event.shiftKey ? "redo" : "undo", "typed");
+        return;
+      }
+      if (typing) return;
+      if (event.key === " ") {
+        event.preventDefault();
+        api.current.submit(pipeRef.current?.session.transport === "playing" ? "stop" : "play", "typed");
+      } else if (event.key === "r" || event.key === "R") {
+        api.current.submit("record", "typed");
+      } else if (event.key === "s" || event.key === "S") {
+        api.current.submit("split", "typed");
+      } else if (event.key === "1") {
+        setMode(StudioModes.select("artist", "artist"));
+      } else if (event.key === "2") {
+        setMode(StudioModes.select("artist", "creator"));
+      } else if (event.key === "3") {
+        setMode(StudioModes.select("artist", "engineer"));
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   useEffect(() => {
     stageRef.current?.scrollTo(0, 0);
     window.scrollTo(0, 0);
   }, [mode]);
-
-  function patch(trackId: string, action: string, amount: string | number | null, map: (track: Track) => Track) {
-    const state = pipeRef.current;
-    if (!state) return;
-    const track = state.session.project.tracks.find((item) => item.id === trackId);
-    if (!track) return;
-    apply(
-      { ...state.session.project, tracks: state.session.project.tracks.map((item) => item.id === trackId ? map(item) : item) },
-      track.name,
-      action,
-      amount,
-    );
-  }
 
   function preview(project: Project) {
     const state = pipeRef.current;
@@ -486,7 +549,57 @@ export function App() {
     const state = pipeRef.current;
     masterOrigin.current = null;
     if (!before || !state) return;
-    apply(state.session.project, "master", "gain-set", state.session.project.masterGainDb, before);
+    onDesk(command("master", "gain-set", state.session.project.masterGainDb), before);
+  }
+
+  function commitArrangement(before: Project, next: Project) {
+    for (const track of next.tracks) {
+      const prior = before.tracks.find((item) => item.id === track.id);
+      if (!prior) continue;
+      if (prior.name !== track.name) {
+        onDesk(command(prior.name, "rename", track.name), before);
+        return;
+      }
+      if (prior.gainDb !== track.gainDb) {
+        onDesk(command(track.name, "gain-set", track.gainDb), before);
+        return;
+      }
+      if (Math.abs(prior.pan - track.pan) > 0.001) {
+        onDesk(command(track.name, "pan", track.pan), before);
+        return;
+      }
+      for (const clip of track.clips) {
+        const old = prior.clips.find((item) => item.id === clip.id);
+        if (old && JSON.stringify(old) !== JSON.stringify(clip)) {
+          onDesk(command(track.name, "clip-set", JSON.stringify(clip)), before);
+          return;
+        }
+      }
+    }
+  }
+
+  function saveProjectFile() {
+    const state = pipeRef.current;
+    if (!state) return;
+    const blob = new Blob([ProjectFile.pack(state.session.project, state.session.buffers)], { type: "application/json" });
+    WavEncoder.download(blob, ProjectFile.filename(state.session.project.name));
+  }
+
+  async function openProjectFile(file: File) {
+    const state = pipeRef.current;
+    if (!state) return;
+    const unpacked = ProjectFile.unpack(await file.text());
+    if (!unpacked) {
+      say("That isn't a SONA project file.");
+      return;
+    }
+    engineRef.current?.stop();
+    captureKind.current = null;
+    const session = Session.fromSaved(unpacked.project, unpacked.buffers, state.session.messages);
+    const next = { ...SonaPipeline.create(session, state.profile), session };
+    remember(next);
+    setPlayhead(0);
+    say(`Opened ${unpacked.project.name}.`);
   }
 
   async function loadSession(id: string) {
@@ -539,8 +652,8 @@ export function App() {
         </div>
         <p className="tagline">Your engineer. Just speak.</p>
         <div className="modes" role="tablist" aria-label="Studio mode">
-          {(["artist", "creator", "engineer"] as const).map((item) => (
-            <button key={item} type="button" role="tab" aria-selected={mode === item} onClick={() => setMode(item)}>
+          {StudioModes.all.map((item) => (
+            <button key={item} type="button" role="tab" aria-selected={mode === item} onClick={() => setMode(StudioModes.select(mode, item))}>
               {item}
             </button>
           ))}
@@ -572,9 +685,15 @@ export function App() {
             onStart={() => submit("from the top", "typed")}
             onUndo={() => submit("undo", "typed")}
             onRedo={() => submit("redo", "typed")}
-            onBpm={(bpm) => apply({ ...project, bpm: Math.min(240, Math.max(40, Math.round(bpm))) }, "session", "bpm", bpm)}
-            onMetronome={() => apply({ ...project, metronome: !project.metronome }, "session", "metronome", project.metronome ? "off" : "on")}
+            onBpm={(bpm) => onDesk(command("session", "bpm", Math.min(240, Math.max(40, Math.round(bpm)))))}
+            onMetronome={() => onDesk(command("session", "metronome", "toggle"))}
             onZoom={(direction) => setZoom((value) => Math.min(160, Math.max(16, value + direction * 8)))}
+          />
+          <DeskTools
+            bouncing={bouncing}
+            onPhrase={(text) => submit(text, "typed")}
+            onSave={saveProjectFile}
+            onOpen={() => projectFileRef.current?.click()}
           />
           {mode === "artist" ? (
             <ArtistStage
@@ -585,6 +704,9 @@ export function App() {
               channel={pipe.channel}
               findSeconds={findSeconds}
               livePeaks={livePeaks}
+              heard={pipe.ears}
+              did={pipe.log}
+              onUseTake={(trackName, take) => onDesk(command(trackName, "use-take", take))}
             />
           ) : null}
           {mode === "creator" ? (
@@ -607,33 +729,38 @@ export function App() {
                 onSelect={(trackId, clipId) => {
                   if (project.selectedTrackId === trackId && project.selectedClipId === clipId) return;
                   const track = project.tracks.find((item) => item.id === trackId);
-                  apply({ ...project, selectedTrackId: trackId, selectedClipId: clipId }, track?.name ?? "track", "select", clipId);
+                  onDesk(command(track?.name ?? "track", "select", clipId));
                 }}
                 onPreview={preview}
-                onCommit={(before, next) => {
-                  const track = next.tracks.find((item, index) => item !== before.tracks[index])?.name ?? "session";
-                  apply(next, track, "edit", null, before);
+                onCommit={commitArrangement}
+                onArm={(trackId) => {
+                  const track = project.tracks.find((item) => item.id === trackId);
+                  if (!track) return;
+                  onDesk(command(track.name, track.armed ? "disarm" : "arm", track.armed ? null : "exclusive"));
                 }}
-                onArm={(trackId) => patch(trackId, "arm", "toggle", (track) => ({ ...track, armed: !track.armed }))}
-                onMute={(trackId) => patch(trackId, "mute", "toggle", (track) => ({ ...track, mute: !track.mute }))}
-                onSolo={(trackId) => patch(trackId, "solo", "toggle", (track) => ({ ...track, solo: !track.solo }))}
-                onToggleEffect={(trackId, effect) => patch(trackId, effect, "toggle", (track) => ({
-                  ...track,
-                  [effect]: { ...track[effect], enabled: !track[effect].enabled },
-                }))}
-                onMarker={(marker: MarkerName) => apply(
-                  { ...project, markers: { ...project.markers, [marker]: pipe.session.playheadSec } },
-                  "session",
-                  "marker",
-                  marker,
-                )}
+                onMute={(trackId) => {
+                  const track = project.tracks.find((item) => item.id === trackId);
+                  if (track) onDesk(command(track.name, "mute", "toggle"));
+                }}
+                onSolo={(trackId) => {
+                  const track = project.tracks.find((item) => item.id === trackId);
+                  if (track) onDesk(command(track.name, "solo", "toggle"));
+                }}
+                onToggleEffect={(trackId, effect) => {
+                  const track = project.tracks.find((item) => item.id === trackId);
+                  if (!track) return;
+                  const current = track[effect];
+                  onDesk(command(track.name, current.enabled ? "remove-effect" : "effect", current.enabled ? effect : `${effect}:${current.preset}`));
+                }}
+                onDesk={onDesk}
+                onPhrase={(text) => submit(text, "typed")}
               />
               <MasterBar
                 preset={project.masterPreset}
                 gainDb={project.masterGainDb}
                 meter={meter}
                 bouncing={bouncing}
-                onPreset={(preset: MasterPreset) => apply({ ...project, masterPreset: preset }, "master", "master", preset)}
+                onPreset={(preset: MasterPreset) => onDesk(command("master", "master", preset))}
                 onGain={(db) => preview({ ...project, masterGainDb: db })}
                 onBeginGain={beginMaster}
                 onCommitGain={commitMaster}
@@ -641,8 +768,21 @@ export function App() {
               />
             </>
           ) : null}
-          {mode === "engineer" ? <PhaseTwoPanel /> : null}
-          <CommandLog entries={pipe.log} />
+          {mode === "engineer" ? (
+            <Mixer
+              project={project}
+              levels={levels}
+              playheadSec={playhead}
+              bouncing={bouncing}
+              log={pipe.log}
+              canUndo={pipe.log.length > 0 && pipe.session.transport !== "recording"}
+              onPreview={preview}
+              onDesk={onDesk}
+              onUndo={() => submit("undo", "typed")}
+              onBounce={() => submit("bounce my master", "typed")}
+            />
+          ) : null}
+          {mode === "engineer" ? null : <CommandLog entries={pipe.log} onUndo={() => submit("undo", "typed")} canUndo={pipe.log.length > 0 && pipe.session.transport !== "recording"} />}
         </div>
         <EngineerPanel
           messages={messages}
@@ -680,6 +820,18 @@ export function App() {
           const file = event.target.files?.[0];
           event.target.value = "";
           if (file) void takeFile(file);
+        }}
+      />
+      <input
+        ref={projectFileRef}
+        className="sr-only"
+        type="file"
+        accept="application/json,.json,.sona.json"
+        aria-label="Open a SONA project file"
+        onChange={(event) => {
+          const file = event.target.files?.[0];
+          event.target.value = "";
+          if (file) void openProjectFile(file);
         }}
       />
     </div>

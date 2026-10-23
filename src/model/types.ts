@@ -69,6 +69,32 @@ export interface ReverbSettings {
   decay: number;
 }
 
+/** Split-band de-esser. The high band is compressed; the raw take is not rewritten. */
+export interface DeesserSettings {
+  enabled: boolean;
+  frequency: number;
+  threshold: number;
+  ratio: number;
+}
+
+export interface AutomationPoint {
+  id: string;
+  timeSec: number;
+  gainDb: number;
+}
+
+export type BusKind = "group" | "reverb" | "delay";
+
+export interface Bus {
+  id: string;
+  name: string;
+  kind: BusKind;
+  gainDb: number;
+  pan: number;
+  mute: boolean;
+  solo: boolean;
+}
+
 export interface Clip {
   id: string;
   bufferId: string;
@@ -102,6 +128,11 @@ export interface Track {
   takes: Take[];
   tune: TuneSettings;
   delay: DelaySettings;
+  /** Group bus this track sums into. Reverb and delay are sends, not this id. */
+  busId: string;
+  deesser: DeesserSettings;
+  /** Absolute volume points. While playing they replace the static fader. */
+  automation: AutomationPoint[];
 }
 
 export interface Markers {
@@ -127,7 +158,10 @@ export interface Project {
   masterPreset: MasterPreset;
   masterGainDb: number;
   loop: LoopRegion | null;
+  /** Record only inside this span when it is set. Null records from the playhead. */
+  punch: LoopRegion | null;
   markers: Markers;
+  buses: Bus[];
   createdAt: number;
   updatedAt: number;
 }

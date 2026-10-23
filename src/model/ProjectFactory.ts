@@ -1,7 +1,9 @@
 import { Ids } from "./Ids";
 import { CuePoint } from "./CuePoint";
 import type {
+  Bus,
   CompressorSettings,
+  DeesserSettings,
   DelaySettings,
   EqSettings,
   Markers,
@@ -32,7 +34,9 @@ export class ProjectFactory {
       masterPreset: "off",
       masterGainDb: 0,
       loop: null,
+      punch: null,
       markers: ProjectFactory.defaultMarkers(120),
+      buses: ProjectFactory.buses(),
       createdAt: now,
       updatedAt: now,
     };
@@ -59,7 +63,27 @@ export class ProjectFactory {
       takes: [],
       tune: ProjectFactory.tuneOff(),
       delay: ProjectFactory.delayOff(),
+      busId: ProjectFactory.busForName(name),
+      deesser: ProjectFactory.deesserOff(),
+      automation: [],
     };
+  }
+
+  static busForName(name: string): string {
+    return /beat|instrument/i.test(name) ? "bus-beat" : "bus-vocals";
+  }
+
+  static buses(): Bus[] {
+    return [
+      { id: "bus-vocals", name: "Vocals", kind: "group", gainDb: 0, pan: 0, mute: false, solo: false },
+      { id: "bus-beat", name: "Beat", kind: "group", gainDb: 0, pan: 0, mute: false, solo: false },
+      { id: "bus-reverb", name: "Reverb", kind: "reverb", gainDb: 0, pan: 0, mute: false, solo: false },
+      { id: "bus-delay", name: "Delay", kind: "delay", gainDb: 0, pan: 0, mute: false, solo: false },
+    ];
+  }
+
+  static deesserOff(): DeesserSettings {
+    return { enabled: false, frequency: 7000, threshold: -28, ratio: 4 };
   }
 
   static tuneOff(): TuneSettings {
@@ -71,8 +95,17 @@ export class ProjectFactory {
   }
 
   static hydrate(project: Project): Project {
+    const savedBuses = project.buses ?? [];
+    const buses = savedBuses.length
+      ? ProjectFactory.buses().map((fallback) => {
+          const saved = savedBuses.find((bus) => bus.id === fallback.id);
+          return saved ? { ...fallback, ...saved, kind: fallback.kind, name: saved.name || fallback.name } : fallback;
+        })
+      : ProjectFactory.buses();
     return {
       ...project,
+      punch: project.punch ?? null,
+      buses,
       tracks: project.tracks.map((track, index) => ProjectFactory.hydrateTrack(track, index)),
     };
   }
@@ -93,6 +126,9 @@ export class ProjectFactory {
       reverb: track.reverb ?? blank.reverb,
       clips: track.clips ?? [],
       width: track.width ?? 0,
+      busId: track.busId || blank.busId,
+      deesser: track.deesser ?? blank.deesser,
+      automation: track.automation ?? [],
     };
   }
 

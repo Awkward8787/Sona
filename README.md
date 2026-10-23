@@ -87,7 +87,13 @@ Find My Mic asks for about fifteen seconds of voice, ranks those four with a one
 
 ## Modes
 
-Artist is the default: waveform, lyrics, record status, and the conversation. Creator opens the timeline, faders, and master that already exist. Engineer is a mode switch and a Phase 2 panel. It does not draw knobs that do nothing. All three sit on one session. `AudioEngine` implements `AudioEnginePort` so a later desk can replace the prototype engine.
+Artist, Creator, and Engineer are three views of one session. Switching them does not write the project. The same Action Engine runs a click, a key, and a spoken command.
+
+- **Artist** is the booth: large record status, waveform, lyrics, takes, what Ears heard, and what SONA just did.
+- **Creator** is the arrangement: tracks, clips, comp lanes, beat import, verse / hook / bridge markers, drag, trim, split, move, a loop region, and a punch region. Record inside a punch region stops at the punch out.
+- **Engineer** is the mixer: per-track gain, pan, mute, solo, EQ, compressor, de-esser, tune, reverb and delay sends, group buses, reverb and delay returns, the master chain, meters, volume automation, and the command log.
+
+`AudioEngine` implements `AudioEnginePort`. Inserts are SONA's own processors. A third-party plugin format is not hosted here.
 
 ## Investor path
 
@@ -103,7 +109,9 @@ The proof pass this build is aimed at:
 8. Master
 9. Bounce
 
-"Load the beat" drops in a generated scratch pattern so there is something to record on. It is not your instrumental. "Import a beat" takes a real audio file, by the picker or by dropping it on the window, and places that file as the raw beat.
+"Load the beat" drops in a generated scratch pattern so there is something to record on. It is not your instrumental. "Scratch vocal" drops two generated tones on the vocal track so you can comp without a microphone. They are not a performance and they have no lyrics. "Import a beat" takes a real audio file, by the picker or by dropping it on the window, and places that file as the raw beat.
+
+Sessions autosave in IndexedDB. Save project writes a `.sona.json` file you can open later. Bounce WAV is on every mode.
 
 ## What you can say
 
@@ -117,7 +125,7 @@ Mix: bring the vocal up 3 db, make it brighter, more air, less harsh, bigger rev
 
 Mic: find my mic, let me hear 1 and 3, three, put me on a warmer mic, try something brighter.
 
-Ears: what you hearing, fix the vocal. Ears can flag clipping, a quiet vocal, sibilance, mud, noise floor, and timing drift against the click. The loudness number is an estimate from RMS, not BS.1770.
+Ears: what you hearing, fix the vocal. Ears can flag clipping, a quiet vocal, sibilance, mud, noise floor, and timing drift against the click. Sibilance arms the de-esser. The loudness number is an estimate from RMS, not BS.1770. The de-esser is a split-band compressor on the playback graph. It does not rewrite the raw take.
 
 Memory: same as last time. The profile keeps preferred mic, preamp, vocal chain, loudness target, tune strength, and reverb taste.
 
@@ -127,4 +135,4 @@ A move of 6 dB or more, a delete, or recording over audio already there waits fo
 
 ## Limits
 
-This is the Phase 1 booth, not the full desk. Routing, buses, automation, plugin hosting, hardware I/O, and the SONA ONE interface are later, and they are not simulated here. Details are in `docs/ROADMAP.md`.
+Hardware I/O beyond the browser's microphone and speakers, third-party plugin hosting, and the SONA ONE interface are not in this build, and they are not drawn as controls. Volume automation is the automation that plays. Tune is still monophonic overlap-add. Details are in `docs/ROADMAP.md`.

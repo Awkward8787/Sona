@@ -22,13 +22,17 @@ Word timestamps, loudness, and tune are documented at their real limits in the R
 
 ## Phase 2 — the SONA DAW
 
-Replace the prototype recording engine with the full SONA DAW. Voice stays first. Touch and mouse stay second. `AudioEnginePort` is the seam.
+Voice stays first. Touch and mouse stay second. `AudioEnginePort` is the seam. The Action Engine is still the only writer.
 
-- **Artist mode** stays the simple room: waveform, lyrics, record status, conversation.
-- **Creator mode** is arrangement, tracks, plugins and vocal chains, and basic mixing.
-- **Engineer mode** is routing, buses, automation, plugin hosting, detailed editing, hardware I/O, and session management.
+What this build does:
 
-Phase 2 does not start by drawing those controls empty. They show up when they do something.
+- **Artist mode** is the booth: waveform, lyrics, record status, takes, what Ears heard, and the commands SONA ran.
+- **Creator mode** is arrangement: tracks, clips, comp lanes, beat import, verse / hook / bridge markers, drag, trim, split, move, loop, and punch.
+- **Engineer mode** is the mixer that actually sounds: gain, pan, mute, solo, EQ, compressor, de-esser, tune, reverb and delay sends, group buses, returns, the master chain, meters, and volume automation. The command log is the undo history.
+
+Sessions stay in IndexedDB and can also move as a project file. WAV bounce stays available in every mode.
+
+Still later, and not drawn here: third-party plugin hosting, hardware I/O past the browser device, and the SONA ONE interface.
 
 ## Phase 3 — SONA Mic
 

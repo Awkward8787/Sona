@@ -5,7 +5,8 @@ import { ProjectOps } from "../model/ProjectOps";
 import { MasterPresets } from "../engine/EffectPresets";
 import { MicChain } from "../mic/MicChain";
 import { SonaTune } from "../tune/SonaTune";
-import type { Project, StoredBuffer, Track } from "../model/types";
+import { VolumeAutomation } from "../model/VolumeAutomation";
+import type { Bus, BusKind, Project, StoredBuffer, Track } from "../model/types";
 
 export interface PlayAnchor {
   contextTime: number;
@@ -33,6 +34,20 @@ interface TrackNodes {
   convolver: ConvolverNode;
   panner: StereoPannerNode;
   fader: GainNode;
+  deessLow: BiquadFilterNode;
+  deessHigh: BiquadFilterNode;
+  deessComp: DynamicsCompressorNode;
+  deessHighGain: GainNode;
+  analyser: AnalyserNode;
+}
+
+interface BusNodes {
+  id: string;
+  kind: BusKind;
+  input: GainNode;
+  panner: StereoPannerNode;
+  fader: GainNode;
+  analyser: AnalyserNode;
 }
 
 interface BuiltGraph {
@@ -41,6 +56,13 @@ interface BuiltGraph {
   masterMakeup: GainNode;
   masterGain: GainNode;
   tracks: Map<string, TrackNodes>;
+  buses: Map<string, BusNodes>;
+}
+
+export interface MixLevels {
+  master: number;
+  tracks: Record<string, number>;
+  buses: Record<string, number>;
 }
 
 const CAPTURE_WORKLET = `
@@ -83,6 +105,7 @@ export class AudioEngine implements AudioEnginePort {
   private analyser: AnalyserNode | null = null;
   private clickGain: GainNode | null = null;
   private trackNodes = new Map<string, TrackNodes>();
+  private busNodes = new Map<string, BusNodes>();
   private trackKey = "";
   private audioBuffers = new Map<string, AudioBuffer>();
   private sources: AudioBufferSourceNode[] = [];
@@ -151,6 +174,7 @@ export class AudioEngine implements AudioEnginePort {
     const startAt = (ctx?.currentTime ?? 0) + 0.05;
     this.anchor = { contextTime: startAt, fromSec };
     this.running = true;
+    this.applyParams(true);
     this.stopSources();
     const buffers = new Map(this.audioBuffers);
     if (ctx && this.project) AudioEngine.stage(ctx, this.project, this.stored, buffers);
@@ -245,13 +269,21 @@ export class AudioEngine implements AudioEnginePort {
   }
 
   meter(): number {
-    if (!this.analyser) return 0;
-    const size = this.analyser.fftSize;
-    if (!this.meterData || this.meterData.length !== size) this.meterData = new Float32Array(size);
-    this.analyser.getFloatTimeDomainData(this.meterData);
-    let sum = 0;
-    for (let i = 0; i < this.meterData.length; i += 1) sum += this.meterData[i] * this.meterData[i];
-    return Math.min(1, Math.sqrt(sum / this.meterData.length) * 4);
+    return AudioEngine.level(this.analyser, this.meterData, (data) => {
+      this.meterData = data;
+    });
+  }
+
+  levels(): MixLevels {
+    const tracks: Record<string, number> = {};
+    this.trackNodes.forEach((nodes, id) => {
+      tracks[id] = AudioEngine.level(nodes.analyser, null, () => undefined);
+    });
+    const buses: Record<string, number> = {};
+    this.busNodes.forEach((nodes, id) => {
+      buses[id] = AudioEngine.level(nodes.analyser, null, () => undefined);
+    });
+    return { master: this.meter(), tracks, buses };
   }
 
   static async render(project: Project, stored: Record<string, StoredBuffer>, sampleRate: number): Promise<AudioBuffer> {
@@ -293,13 +325,23 @@ export class AudioEngine implements AudioEnginePort {
 
   private ensureTracks(): boolean {
     if (!this.ctx || !this.project || !this.masterIn) return false;
-    const key = this.project.tracks.map((track) => track.id).join("|");
+    const buses = this.project.buses ?? [];
+    const key = `${this.project.tracks.map((track) => `${track.id}:${track.busId}`).join("|")}#${buses.map((bus) => bus.id).join("|")}`;
     if (key === this.trackKey) return false;
-    this.trackNodes.forEach((nodes) => nodes.fader.disconnect());
+    this.trackNodes.forEach((nodes) => {
+      nodes.analyser.disconnect();
+      nodes.wet.disconnect();
+      nodes.delayWet.disconnect();
+    });
+    this.busNodes.forEach((bus) => bus.analyser.disconnect());
     this.trackNodes.clear();
+    this.busNodes.clear();
+    for (const bus of buses) {
+      this.busNodes.set(bus.id, AudioEngine.createBus(this.ctx, bus, this.masterIn));
+    }
     for (const track of this.project.tracks) {
       const nodes = AudioEngine.trackNodes(this.ctx);
-      nodes.fader.connect(this.masterIn);
+      AudioEngine.wireTrack(nodes, track, this.busNodes, this.masterIn);
       this.trackNodes.set(track.id, nodes);
     }
     this.trackKey = key;
@@ -321,14 +363,40 @@ export class AudioEngine implements AudioEnginePort {
     masterComp.connect(masterMakeup);
     masterMakeup.connect(masterGain);
     const tracks = new Map<string, TrackNodes>();
+    const buses = new Map<string, BusNodes>();
     const inputs = new Map<string, GainNode>();
+    for (const bus of project.buses ?? []) buses.set(bus.id, AudioEngine.createBus(ctx, bus, masterIn));
     for (const track of project.tracks) {
       const nodes = AudioEngine.trackNodes(ctx);
-      nodes.fader.connect(masterIn);
+      AudioEngine.wireTrack(nodes, track, buses, masterIn);
       tracks.set(track.id, nodes);
       inputs.set(track.id, nodes.input);
     }
-    return { inputs, masterComp, masterMakeup, masterGain, tracks };
+    return { inputs, masterComp, masterMakeup, masterGain, tracks, buses };
+  }
+
+  private static createBus(ctx: BaseAudioContext, bus: Bus, master: GainNode): BusNodes {
+    const input = ctx.createGain();
+    const panner = ctx.createStereoPanner();
+    const fader = ctx.createGain();
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 256;
+    input.connect(panner);
+    panner.connect(fader);
+    fader.connect(analyser);
+    analyser.connect(master);
+    return { id: bus.id, kind: bus.kind, input, panner, fader, analyser };
+  }
+
+  private static wireTrack(nodes: TrackNodes, track: Track, buses: Map<string, BusNodes>, master: GainNode): void {
+    const group = buses.get(track.busId);
+    nodes.analyser.connect(group ? group.input : master);
+    const reverb = [...buses.values()].find((bus) => bus.kind === "reverb");
+    const delay = [...buses.values()].find((bus) => bus.kind === "delay");
+    if (reverb) nodes.wet.connect(reverb.input);
+    else nodes.wet.connect(nodes.panner);
+    if (delay) nodes.delayWet.connect(delay.input);
+    else nodes.delayWet.connect(nodes.panner);
   }
 
   private static trackNodes(ctx: BaseAudioContext): TrackNodes {
@@ -360,10 +428,29 @@ export class AudioEngine implements AudioEnginePort {
     const convolver = ctx.createConvolver();
     const panner = ctx.createStereoPanner();
     const fader = ctx.createGain();
+    const deessLow = ctx.createBiquadFilter();
+    const deessHigh = ctx.createBiquadFilter();
+    deessLow.type = "lowpass";
+    deessHigh.type = "highpass";
+    deessLow.Q.value = 0.707;
+    deessHigh.Q.value = 0.707;
+    const deessComp = ctx.createDynamicsCompressor();
+    deessComp.attack.value = 0.003;
+    deessComp.release.value = 0.08;
+    deessComp.knee.value = 2;
+    const deessHighGain = ctx.createGain();
+    deessHighGain.gain.value = 0;
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 256;
     input.connect(low);
     low.connect(mid);
     mid.connect(high);
-    high.connect(comp);
+    high.connect(deessLow);
+    high.connect(deessHigh);
+    deessHigh.connect(deessComp);
+    deessComp.connect(deessHighGain);
+    deessLow.connect(comp);
+    deessHighGain.connect(comp);
     comp.connect(makeup);
     makeup.connect(dry);
     dry.connect(panner);
@@ -371,22 +458,31 @@ export class AudioEngine implements AudioEnginePort {
     delay.connect(delayFeedback);
     delayFeedback.connect(delay);
     delay.connect(delayWet);
-    delayWet.connect(panner);
     makeup.connect(highpass);
     highpass.connect(convolver);
     convolver.connect(wet);
-    wet.connect(panner);
     panner.connect(fader);
-    return { input, low, mid, high, comp, makeup, dry, wet, delay, delayFeedback, delayWet, highpass, convolver, panner, fader };
+    fader.connect(analyser);
+    return {
+      input, low, mid, high, comp, makeup, dry, wet, delay, delayFeedback, delayWet, highpass, convolver, panner, fader,
+      deessLow, deessHigh, deessComp, deessHighGain, analyser,
+    };
   }
 
   private applyParams(live: boolean): void {
     if (!this.project) return;
     const now = this.ctx?.currentTime ?? 0;
+    const auto = this.running && this.anchor && this.ctx
+      ? { fromSec: Math.max(0, this.clock() ?? this.anchor.fromSec), origin: Math.max(now, this.anchor.contextTime) }
+      : null;
     for (const track of this.project.tracks) {
       const nodes = this.trackNodes.get(track.id);
       if (!nodes || !this.ctx) continue;
-      AudioEngine.applyTrack(nodes, this.project, track, this.ctx, live, now);
+      AudioEngine.applyTrack(nodes, this.project, track, this.ctx, live, now, auto);
+    }
+    for (const bus of this.project.buses ?? []) {
+      const nodes = this.busNodes.get(bus.id);
+      if (nodes) AudioEngine.applyBus(nodes, bus, live, now);
     }
   }
 
@@ -399,7 +495,14 @@ export class AudioEngine implements AudioEnginePort {
   private static applyStatic(graph: BuiltGraph, project: Project, ctx: BaseAudioContext): void {
     graph.tracks.forEach((nodes, id) => {
       const track = project.tracks.find((item) => item.id === id);
-      if (track) AudioEngine.applyTrack(nodes, project, track, ctx, false, 0);
+      if (track) {
+        const auto = track.automation.length > 0 ? { fromSec: 0, origin: 0 } : null;
+        AudioEngine.applyTrack(nodes, project, track, ctx, false, 0, auto);
+      }
+    });
+    graph.buses.forEach((nodes, id) => {
+      const bus = project.buses.find((item) => item.id === id);
+      if (bus) AudioEngine.applyBus(nodes, bus, false, 0);
     });
     AudioEngine.applyMasterNodes(graph.masterComp, graph.masterMakeup, graph.masterGain, project, false, 0);
   }
@@ -411,10 +514,19 @@ export class AudioEngine implements AudioEnginePort {
     ctx: BaseAudioContext,
     live: boolean,
     now: number,
+    auto: { fromSec: number; origin: number } | null,
   ): void {
     AudioEngine.setGain(nodes.low.gain, track.eq.enabled ? track.eq.lowDb : 0, live, now);
     AudioEngine.setGain(nodes.mid.gain, track.eq.enabled ? track.eq.midDb : 0, live, now);
     AudioEngine.setGain(nodes.high.gain, track.eq.enabled ? track.eq.highDb : 0, live, now);
+    const deess = track.deesser;
+    const nyquist = Math.max(1000, ctx.sampleRate * 0.45);
+    const split = deess?.enabled ? deess.frequency : nyquist;
+    nodes.deessLow.frequency.value = split;
+    nodes.deessHigh.frequency.value = deess?.frequency ?? 7000;
+    nodes.deessComp.threshold.value = deess?.enabled ? deess.threshold : 0;
+    nodes.deessComp.ratio.value = deess?.enabled ? Math.max(1, deess.ratio) : 1;
+    AudioEngine.setGain(nodes.deessHighGain.gain, deess?.enabled ? 1 : 0, live, now);
     const compOn = track.compressor.enabled;
     nodes.comp.threshold.value = compOn ? track.compressor.threshold : 0;
     nodes.comp.ratio.value = compOn ? track.compressor.ratio : 1;
@@ -422,8 +534,8 @@ export class AudioEngine implements AudioEnginePort {
     nodes.comp.release.value = track.compressor.release;
     AudioEngine.setGain(nodes.makeup.gain, compOn ? Gain.toLinear(track.compressor.makeupDb) : 1, live, now);
     const mix = track.reverb.enabled ? Math.max(0, Math.min(1, track.reverb.mix)) : 0;
-    AudioEngine.setGain(nodes.dry.gain, Math.cos((mix * Math.PI) / 2), live, now);
-    AudioEngine.setGain(nodes.wet.gain, Math.sin((mix * Math.PI) / 2), live, now);
+    AudioEngine.setGain(nodes.dry.gain, 1, live, now);
+    AudioEngine.setGain(nodes.wet.gain, mix, live, now);
     if (track.reverb.enabled) nodes.convolver.buffer = AudioEngine.impulse(ctx, track.reverb.decay);
     const spread = track.width ? Math.sign(track.pan || 1) * track.width * 0.12 : 0;
     const pan = Math.max(-1, Math.min(1, track.pan + (track.pan === 0 ? 0 : spread)));
@@ -431,8 +543,56 @@ export class AudioEngine implements AudioEnginePort {
     nodes.delay.delayTime.value = track.delay?.timeSec ?? 0.28;
     AudioEngine.setGain(nodes.delayFeedback.gain, track.delay?.enabled ? track.delay.feedback : 0, live, now);
     AudioEngine.setGain(nodes.delayWet.gain, track.delay?.enabled ? track.delay.mix : 0, live, now);
-    const level = ProjectOps.audible(project, track) ? Gain.toLinear(track.gainDb) : 0;
-    AudioEngine.setGain(nodes.fader.gain, level, live, now);
+    AudioEngine.writeFader(nodes.fader.gain, project, track, live, now, auto);
+  }
+
+  private static applyBus(nodes: BusNodes, bus: Bus, live: boolean, now: number): void {
+    AudioEngine.setGain(nodes.panner.pan, bus.pan, live, now);
+    AudioEngine.setGain(nodes.fader.gain, bus.mute ? 0 : Gain.toLinear(bus.gainDb), live, now);
+  }
+
+  private static writeFader(
+    param: AudioParam,
+    project: Project,
+    track: Track,
+    live: boolean,
+    now: number,
+    auto: { fromSec: number; origin: number } | null,
+  ): void {
+    if (!ProjectOps.audible(project, track)) {
+      AudioEngine.setGain(param, 0, live, now);
+      return;
+    }
+    if (!auto || track.automation.length === 0) {
+      AudioEngine.setGain(param, Gain.toLinear(track.gainDb), live, now);
+      return;
+    }
+    const points = VolumeAutomation.ordered(track.automation);
+    const origin = Math.max(now, auto.origin);
+    param.cancelScheduledValues(origin);
+    param.setValueAtTime(Gain.toLinear(VolumeAutomation.valueAt(points, auto.fromSec)), origin);
+    for (const point of points) {
+      if (point.timeSec <= auto.fromSec + 0.001) continue;
+      param.linearRampToValueAtTime(
+        Math.max(0, Gain.toLinear(point.gainDb)),
+        origin + (point.timeSec - auto.fromSec),
+      );
+    }
+  }
+
+  private static level(
+    analyser: AnalyserNode | null,
+    cached: Float32Array<ArrayBuffer> | null,
+    keep: (data: Float32Array<ArrayBuffer>) => void,
+  ): number {
+    if (!analyser) return 0;
+    const size = analyser.fftSize;
+    const data = cached && cached.length === size ? cached : new Float32Array(new ArrayBuffer(size * 4));
+    keep(data);
+    analyser.getFloatTimeDomainData(data);
+    let sum = 0;
+    for (let index = 0; index < data.length; index += 1) sum += data[index] * data[index];
+    return Math.min(1, Math.sqrt(sum / data.length) * 4);
   }
 
   private static applyMasterNodes(

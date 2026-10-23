@@ -8,8 +8,10 @@ import { command, type CommandLogEntry, type DawCommand } from "../daw/DawComman
 import type { ArtistProfile } from "../memory/SonaMemory";
 import { SonaMemory } from "../memory/SonaMemory";
 import { Session, type SessionState } from "../session/Session";
+import { DeskCommands } from "./DeskCommands";
 import { ProjectCommands } from "./ProjectCommands";
 import { ScratchBeat } from "../record/ScratchBeat";
+import { ScratchVocal } from "../record/ScratchVocal";
 import { SonaEars } from "../ears/SonaEars";
 import { FindMyMic, type RankedMic } from "../mic/FindMyMic";
 import { MicChain } from "../mic/MicChain";
@@ -194,6 +196,7 @@ export class ActionEngine {
     }
     if (item.action === "analyze") return ActionEngine.analyze(session, profile, item);
     if (item.action === "scratch-beat") return ActionEngine.scratch(session, profile, item);
+    if (item.action === "scratch-vocal") return ActionEngine.scratchVocal(session, profile, item);
     if (item.action === "find-mic") {
       return {
         ...base,
@@ -310,9 +313,28 @@ export class ActionEngine {
       return ActionEngine.via(session, profile, intent, command("session", "metronome", session.project.metronome ? "on" : "off"));
     }
 
-    const intent = ActionEngine.toIntent(item, session);
+    const desk = DeskCommands.apply(session.project, item, session.playheadSec, session.transport);
+    if (desk) {
+      return {
+        ...base,
+        session: desk.project === session.project ? session : { ...session, project: desk.project },
+        reply: desk.reply,
+        inverse: desk.inverse,
+      };
+    }
+
+    const seated = ActionEngine.seatPunch(session, item);
+    const intent = ActionEngine.toIntent(item, seated);
     if (!intent) return { ...base, reply: "I couldn't turn that into a session move.", inverse: command(item.track, "noop", null) };
-    return ActionEngine.via(session, profile, intent, ActionEngine.inverseFor(item, session));
+    return ActionEngine.via(seated, profile, intent, ActionEngine.inverseFor(item, seated));
+  }
+
+  /** A punch region keeps a plain record inside the span. Lyric punches still seek themselves. */
+  private static seatPunch(session: SessionState, item: DawCommand): SessionState {
+    if (item.action !== "record" || item.amount != null || !session.project.punch) return session;
+    const punch = session.project.punch;
+    if (session.playheadSec >= punch.startSec && session.playheadSec < punch.endSec - 0.01) return session;
+    return { ...session, playheadSec: punch.startSec };
   }
 
   private static via(session: SessionState, profile: ArtistProfile, intent: Intent, inverse: DawCommand): ReturnType<typeof ActionEngine.applyOne> {
@@ -352,10 +374,61 @@ export class ActionEngine {
     }
     if (item.action === "master") return command("master", "master", session.project.masterPreset);
     if (item.action === "pan") {
-      const track = session.project.tracks.find((entry) => entry.name.toLowerCase() === item.track.toLowerCase());
+      const track = ActionEngine.namedTrack(session, item.track);
       return command(item.track, "pan", track?.pan ?? 0);
     }
+    if (item.action === "mute") {
+      const track = ActionEngine.namedTrack(session, item.track);
+      return command(item.track, "mute", track?.mute ? "true" : "false");
+    }
+    if (item.action === "solo") {
+      const track = ActionEngine.namedTrack(session, item.track);
+      return command(item.track, "solo", track?.solo ? "true" : "false");
+    }
+    if (item.action === "effect" && typeof item.amount === "string") {
+      const effect = item.amount.split(":")[0];
+      const track = ActionEngine.namedTrack(session, item.track);
+      if (track && (effect === "eq" || effect === "compressor" || effect === "reverb")) {
+        const current = effect === "eq" ? track.eq : effect === "compressor" ? track.compressor : track.reverb;
+        if (!current.enabled) return command(item.track, "remove-effect", effect);
+        return command(item.track, "effect", `${effect}:${current.preset}`);
+      }
+    }
+    if (item.action === "remove-effect" && typeof item.amount === "string") {
+      const track = ActionEngine.namedTrack(session, item.track);
+      if (track && (item.amount === "eq" || item.amount === "compressor" || item.amount === "reverb")) {
+        const current = item.amount === "eq" ? track.eq : item.amount === "compressor" ? track.compressor : track.reverb;
+        return command(item.track, "effect", `${item.amount}:${current.preset}`);
+      }
+    }
+    if (item.action === "loop") {
+      const loop = session.project.loop;
+      return command("session", "loop-range", loop ? `${loop.startSec}:${loop.endSec}` : "clear");
+    }
+    if (item.action === "marker" && typeof item.amount === "string") {
+      const name = item.amount as MarkerName;
+      if (name === "intro" || name === "verse" || name === "chorus" || name === "bridge") {
+        return command("session", "marker-at", `${name}:${session.project.markers[name]}`);
+      }
+    }
+    if (item.action === "metronome") {
+      return command("session", "metronome", session.project.metronome ? "on" : "off");
+    }
+    if (item.action === "bpm" && typeof item.amount === "number") {
+      return command("session", "bpm", session.project.bpm);
+    }
+    if (item.action === "tune-strength" && typeof item.amount === "number") {
+      return command(item.track, "tune-strength", ProjectCommands.selected(session.project)?.tune.strength ?? 0.55);
+    }
+    if (item.action === "rename" && typeof item.amount === "string") {
+      return command(item.amount, "rename", item.track);
+    }
     return command(item.track, "noop", null);
+  }
+
+  private static namedTrack(session: SessionState, name: string) {
+    if (name === "master") return null;
+    return session.project.tracks.find((entry) => entry.name.toLowerCase() === name.toLowerCase()) ?? null;
   }
 
   private static toIntent(item: DawCommand, session: SessionState): Intent | null {
@@ -445,6 +518,24 @@ export class ActionEngine {
       session: { ...session, project: placed.project, buffers: { ...session.buffers, [buffer.id]: buffer } },
       profile,
       reply: "Beat is up. It's a scratch pattern I generated so you can record on it — import your instrumental when you have the file.",
+      inverse: command(item.track, "noop", null),
+      effect: "none",
+      exportTarget: null,
+      commandsWhileRecording: null,
+      audition: null,
+      monitor: null,
+      inputGainDb: null,
+    };
+  }
+
+  private static scratchVocal(session: SessionState, profile: ArtistProfile, item: DawCommand): ReturnType<typeof ActionEngine.applyOne> {
+    const placed = ScratchVocal.place(session.project);
+    const buffers = { ...session.buffers };
+    for (const buffer of placed.buffers) buffers[buffer.id] = buffer;
+    return {
+      session: { ...session, project: placed.project, buffers },
+      profile,
+      reply: placed.reply,
       inverse: command(item.track, "noop", null),
       effect: "none",
       exportTarget: null,
@@ -580,7 +671,8 @@ export class ActionEngine {
     if (item.action === "tune" && item.amount === "tighter") tighter = true;
     if (item.action === "tune" && item.amount === "less") tighter = false;
     if (item.action === "tune-strength" && typeof item.amount === "number") {
-      const track = ProjectCommands.selected(session.project);
+      const named = session.project.tracks.find((entry) => entry.name.toLowerCase() === item.track.toLowerCase());
+      const track = named ?? ProjectCommands.selected(session.project);
       if (track) {
         const project = {
           ...session.project,
@@ -590,7 +682,7 @@ export class ActionEngine {
           session: { ...session, project },
           profile,
           reply: `Tune strength is ${Math.round((item.amount as number) * 100)}%.`,
-          inverse: command(item.track, "tune-strength", previous?.strength ?? 0.55),
+          inverse: command(track.name, "tune-strength", track.tune.strength),
           effect: "none",
           exportTarget: null,
           commandsWhileRecording: null,

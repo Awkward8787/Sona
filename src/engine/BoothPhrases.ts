@@ -20,6 +20,9 @@ export function boothPhrase(text: string): Intent | null {
     return { type: "widenDoubles" };
   }
   if (text === "load the beat" || text === "load the scratch beat" || text === "load a scratch beat") return { type: "loadScratch" };
+  if (text === "scratch vocal" || text === "load a scratch vocal" || text === "load the scratch vocal") {
+    return { type: "loadScratchVocal" };
+  }
   if (/^(?:import|load)(?:\s+a|\s+the)?\s+(?:beat|instrumental|backing track)$/.test(text) && text !== "load the beat") {
     return { type: "importBeat" };
   }
