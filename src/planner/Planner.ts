@@ -84,7 +84,7 @@ export class DeterministicPlanner implements Planner {
     const track = DeterministicPlanner.selected(context.project);
     if (note.id === "clipping") return command(track, "gain", -3);
     if (note.id === "quiet") return command(track, "gain", 3);
-    if (note.id === "sibilance") return command(track, "mix", "harsh");
+    if (note.id === "sibilance") return command(track, "deesser", "on");
     if (note.id === "mud") return command(track, "mix", "mud");
     if (note.id === "noise") return command(track, "gain", -2);
     if (note.id === "timing") return command("session", "metronome", "on");
@@ -196,6 +196,8 @@ export class DeterministicPlanner implements Planner {
         return [command(DeterministicPlanner.selected(project), "analyze", null)];
       case "loadScratch":
         return [command("beat", "scratch-beat", null)];
+      case "loadScratchVocal":
+        return [command("vocal", "scratch-vocal", null)];
       case "importBeat":
         return [command("beat", "import-beat", null)];
       case "compTakes":

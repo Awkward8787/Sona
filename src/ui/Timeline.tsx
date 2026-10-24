@@ -1,9 +1,12 @@
 import { useEffect, useMemo, useRef } from "react";
+import { command, type DawCommand } from "../daw/DawCommand";
 import { Peaks } from "../audio/Peaks";
+import { DeskCommands } from "../action/DeskCommands";
 import { ClipEdits } from "../model/ClipEdits";
 import { Gain } from "../model/Gain";
 import { ProjectOps } from "../model/ProjectOps";
 import type { Clip, MarkerName, Project, StoredBuffer, Track, Transport } from "../model/types";
+import { StudioModes } from "./StudioModes";
 import { Waveform } from "./Waveform";
 
 const MARKERS: MarkerName[] = ["intro", "verse", "chorus", "bridge"];
@@ -24,7 +27,8 @@ export function Timeline({
   onMute,
   onSolo,
   onToggleEffect,
-  onMarker,
+  onDesk,
+  onPhrase,
 }: {
   project: Project;
   buffers: Record<string, StoredBuffer>;
@@ -41,11 +45,14 @@ export function Timeline({
   onMute: (trackId: string) => void;
   onSolo: (trackId: string) => void;
   onToggleEffect: (trackId: string, effect: "eq" | "compressor" | "reverb") => void;
-  onMarker: (marker: MarkerName) => void;
+  onDesk: (item: DawCommand) => void;
+  onPhrase: (text: string) => void;
 }) {
   const scrollerRef = useRef<HTMLDivElement>(null);
   const seconds = Math.max(48, ProjectOps.contentEnd(project) + 8, playheadSec + 8, project.markers.bridge + 8);
   const laneWidth = Math.ceil(seconds * zoom);
+  const bar = (60 / Math.max(1, project.bpm)) * 4;
+  const regionStart = Math.floor(playheadSec / bar) * bar;
 
   useEffect(() => {
     if (transport === "stopped") return;
@@ -59,7 +66,14 @@ export function Timeline({
   }, [playheadSec, transport, zoom]);
 
   return (
-    <div className="timeline" ref={scrollerRef}>
+    <div className="arrangement" data-surfaces={StudioModes.surfaces("creator").join(" ")}>
+      <div className="arrange-tools" role="toolbar" aria-label="Arrangement">
+        <button type="button" onClick={() => onPhrase("loop 4 bars")}>Loop 4</button>
+        <button type="button" onClick={() => onPhrase("stop looping")} disabled={!project.loop}>Clear loop</button>
+        <button type="button" onClick={() => onDesk(command("session", "punch-region", `${regionStart}:${regionStart + bar * 4}`))}>Punch 4</button>
+        <button type="button" onClick={() => onDesk(command("session", "punch-region", "clear"))} disabled={!project.punch}>Clear punch</button>
+      </div>
+      <div className="timeline" ref={scrollerRef}>
       <div className="sheet" style={{ width: 272 + laneWidth }}>
         <div className="ruler-row">
           <div className="gutter ruler-gutter">Timeline</div>
@@ -82,10 +96,11 @@ export function Timeline({
                 key={marker}
                 type="button"
                 className="marker"
+                aria-label={`${DeskCommands.markerLabel(marker)} section`}
                 style={{ left: project.markers[marker] * zoom }}
-                onClick={() => onMarker(marker)}
+                onClick={() => onDesk(command("session", "marker-at", `${marker}:${playheadSec}`))}
               >
-                {marker.slice(0, 1).toUpperCase()}
+                {DeskCommands.markerLabel(marker)}
               </button>
             ))}
           </div>
@@ -111,8 +126,15 @@ export function Timeline({
             onMute={onMute}
             onSolo={onSolo}
             onToggleEffect={onToggleEffect}
+            onDesk={onDesk}
           />
         ))}
+        {project.punch ? (
+          <div
+            className="punch-region"
+            style={{ left: 272 + project.punch.startSec * zoom, width: Math.max(2, (project.punch.endSec - project.punch.startSec) * zoom) }}
+          />
+        ) : null}
         {project.loop ? (
           <div
             className="loop-region"
@@ -120,6 +142,7 @@ export function Timeline({
           />
         ) : null}
         <div className="playhead" style={{ left: 272 + playheadSec * zoom }} />
+      </div>
       </div>
     </div>
   );
@@ -144,6 +167,7 @@ function TrackRow({
   onMute,
   onSolo,
   onToggleEffect,
+  onDesk,
 }: {
   track: Track;
   project: Project;
@@ -163,6 +187,7 @@ function TrackRow({
   onMute: (trackId: string) => void;
   onSolo: (trackId: string) => void;
   onToggleEffect: (trackId: string, effect: "eq" | "compressor" | "reverb") => void;
+  onDesk: (item: DawCommand) => void;
 }) {
   const origin = useRef(project);
   const editing = useRef(false);
@@ -240,7 +265,7 @@ function TrackRow({
         className="lane"
         style={{ width: laneWidth }}
         onPointerDown={(event) => {
-          if ((event.target as HTMLElement).closest(".clip")) return;
+          if ((event.target as HTMLElement).closest(".clip, .take-row, button")) return;
           const rect = event.currentTarget.getBoundingClientRect();
           onSelect(track.id, null);
           onSeek(Math.max(0, (event.clientX - rect.left) / zoom));
@@ -270,6 +295,18 @@ function TrackRow({
             style={{ left: Math.max(0, recordStart) * zoom, width: Math.max(8, (playheadSec - recordStart) * zoom) }}
           >
             {livePeaks ? <Waveform peaks={livePeaks} color={track.color} width={Math.max(8, (playheadSec - recordStart) * zoom)} height={64} /> : null}
+          </div>
+        ) : null}
+        {track.takes.length > 0 ? (
+          <div className="comp-lanes" aria-label={`${track.name} takes`}>
+            {track.takes.map((take) => (
+              <div key={take.id} className="take-row">
+                <button type="button" onClick={() => onDesk(command(track.name, "use-take", take.number))}>
+                  Use take {take.number}
+                </button>
+                <span>{take.durationSec.toFixed(1)}s{take.words.length > 0 ? ` · ${take.words.map((word) => word.text).join(" ")}` : ""}</span>
+              </div>
+            ))}
           </div>
         ) : null}
       </div>

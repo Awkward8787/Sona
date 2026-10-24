@@ -65,6 +65,7 @@ export type Intent =
   | { type: "recallMemory" }
   | { type: "importBeat" }
   | { type: "loadScratch" }
+  | { type: "loadScratchVocal" }
   | { type: "micCheck" }
   | { type: "monitor"; enabled: boolean }
   | { type: "inputGain"; db: number }

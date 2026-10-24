@@ -90,6 +90,7 @@ export class IntentExecutor {
       case "recallMemory":
       case "importBeat":
       case "loadScratch":
+      case "loadScratchVocal":
       case "micCheck":
       case "monitor":
       case "inputGain":
